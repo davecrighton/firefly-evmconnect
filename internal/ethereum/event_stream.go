@@ -304,6 +304,8 @@ func (es *eventStream) leadGroupSteadyState() bool {
 	failCount := 0
 	filterResetRequired := false
 	filterRPCMethodToUse := ""
+	filterLastCreated := int64(-1)
+
 	for {
 		if es.c.doFailureDelay(es.ctx, failCount) {
 			log.L(es.ctx).Debugf("Stream loop exiting")
@@ -361,6 +363,7 @@ func (es *eventStream) leadGroupSteadyState() bool {
 					failCount++
 					continue
 				}
+				filterLastCreated = time.Now().UnixMilli()
 				log.L(es.ctx).Infof("Filter '%v' established", filter)
 			}
 			// Get the next batch of logs
@@ -369,8 +372,13 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			// If we fail to query we just retry - setting filter to nil if not found
 			if rpcErr != nil {
 				if mapError(filterRPCMethods, rpcErr.Error()) == ffcapi.ErrorReasonNotFound {
-					log.L(es.ctx).Infof("Filter '%v' reset: %s", filter, rpcErr.Message)
-					filter = ""
+					if time.Now().UnixMilli()-filterLastCreated > 30000 {
+						log.L(es.ctx).Infof("Filter '%v' reset: %s", filter, rpcErr.Message)
+						filter = ""
+					} else {
+						log.L(es.ctx).Warnf("Failed to query filter (%s): %s, but filter was created less than 30 seconds ago - will retry", filterRPCMethodToUse, rpcErr.Message)
+						continue
+					}
 				}
 				log.L(es.ctx).Errorf("Failed to query filter (%s): %s", filterRPCMethodToUse, rpcErr.Message)
 				failCount++
@@ -381,9 +389,13 @@ func (es *eventStream) leadGroupSteadyState() bool {
 			events, enrichErr := es.filterEnrichSort(es.ctx, ag, ethLogs)
 			if enrichErr != nil {
 				log.L(es.ctx).Errorf("Failed to enrich events: %v", enrichErr)
-				// We have to reset our filter, as otherwise we'll skip past these events.
-				filterResetRequired = true
-				failCount++
+				if time.Now().UnixMilli()-filterLastCreated > 30000 {
+					// We have to reset our filter, as otherwise we'll skip past these events.
+					filterResetRequired = true
+					failCount++
+				} else {
+					log.L(es.ctx).Warnf("Failed to enrich events: %v, but filter was created less than 30 seconds ago - will retry", enrichErr)
+				}
 				continue
 			}
 
